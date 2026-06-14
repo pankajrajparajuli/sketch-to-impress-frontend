@@ -44,12 +44,12 @@ export function connectGameSocket(credentials: Credentials) {
   });
 
   gameSocket.on("connect", () => {
-    console.log("[Socket] Connected to /game namespace.");
+    console.log("[Socket] Connected to /game namespace successfully. Socket ID:", gameSocket.id);
     useGameStore.getState().setConnection(true, false);
   });
 
-  gameSocket.on("disconnect", () => {
-    console.log("[Socket] Disconnected from /game namespace.");
+  gameSocket.on("disconnect", (reason) => {
+    console.log("[Socket] Disconnected from /game namespace. Reason:", reason);
     useGameStore.getState().setConnection(false, true);
   });
 
@@ -85,19 +85,29 @@ export function connectGameSocket(credentials: Credentials) {
     if (targetHostId) useGameStore.getState().setHost(targetHostId);
   });
 
+  // Intercept phase updates and safely transition everyone back into the Lobby component layout
   gameSocket.on("v1:game:phase_changed", (data: { roomCode: string; status: RoomStatus }) => {
-    console.log("[Socket] Phase changed:", data?.status);
+    console.log("[Socket] Phase changed event intercepted:", data?.status);
     if (!data?.status) return;
+    
     if (data.status === "LOBBY") {
+      console.log("[Socket] Reverting match store flags cleanly back to LOBBY stage...");
       useGameStore.getState().resetMatch();
+      useGameStore.getState().setStatus("LOBBY");
     } else {
+      // Short circuit protection against lagging historical frames breaking active lobby view
+      if (useGameStore.getState().status === "LOBBY") {
+        console.warn(`[Socket] Ignored lagging ${data.status} event traffic because lobby was already reset.`);
+        return;
+      }
       useGameStore.getState().setStatus(data.status);
     }
   });
 
   gameSocket.on("v1:game:lobby_reset", () => {
-    console.log("[Socket] Lobby reset received. Resetting state...");
+    console.log("[Socket] Global lobby reset broadcast received. Cleaning store state variables...");
     useGameStore.getState().resetMatch();
+    useGameStore.getState().setStatus("LOBBY");
   });
 
   gameSocket.on("v1:game:round_started", (data: { round: number; prompt: string; roundEndTimestamp: number; serverTime: number }) => {
@@ -106,6 +116,7 @@ export function connectGameSocket(credentials: Credentials) {
   });
 
   const handleGallery = (data: any) => {
+    if (useGameStore.getState().status === "LOBBY") return;
     console.log("[Socket] Gallery data received:", data);
     const galleryPayload = data?.gallery ?? data;
     if (galleryPayload) {
@@ -116,23 +127,24 @@ export function connectGameSocket(credentials: Credentials) {
   gameSocket.on("v1:game:gallery_started", handleGallery);
   gameSocket.on("v1:gallery:next_canvas", (data: any) => {
     console.log("[Socket] Next canvas:", data);
-    // setGallery already sets status to GALLERY
     handleGallery(data);
   });
 
   const processStandings = (data: any) => {
-    if (!data) return;
+    if (!data || useGameStore.getState().status === "LOBBY") return;
     const items = data.standings ?? data.podium ?? (Array.isArray(data) ? data : null);
     if (items) useGameStore.getState().setStandings(items);
   };
 
   gameSocket.on("v1:game:round_complete", processStandings);
   gameSocket.on("v1:game:round_results_started", (data: any) => {
+    if (useGameStore.getState().status === "LOBBY") return;
     useGameStore.getState().setStatus("ROUND_RESULTS");
     processStandings(data);
   });
   gameSocket.on("v1:game:match_over", processStandings);
   gameSocket.on("v1:game:final_results_started", (data: any) => {
+    if (useGameStore.getState().status === "LOBBY") return;
     useGameStore.getState().setStatus("FINAL_RESULTS");
     processStandings(data);
   });
@@ -168,7 +180,7 @@ export function connectGameSocket(credentials: Credentials) {
   });
 
   const interceptException = (error: { message?: string; code?: string }) => {
-    console.error("[Socket] Exception:", error);
+    console.error("[Socket] Exception reported from server:", error);
     useGameStore.getState().setError(error.message ?? "The game server reported an error.");
   };
   gameSocket.on("error", interceptException);
@@ -192,6 +204,10 @@ export function getSocket(): Socket | null {
 
 export function disconnectGameSocket() {
   if (socket) {
+    socket.off("v1:room:settings_updated");
+    socket.off("v1:room:settings_changed");
+    socket.off("v1:game:lobby_reset");
+    socket.off("v1:game:phase_changed");
     socket.removeAllListeners();
     socket.disconnect();
   }
@@ -205,15 +221,19 @@ export function emitGame(
   acknowledgement?: (response: { success: boolean; message?: string }) => void,
 ) {
   if (!socket) {
-    console.warn(`[Socket] Emission blocked. Socket not connected for event: ${event}`);
+    console.warn(`[Socket] Emission blocked. Socket context null or unassigned for event: ${event}`);
     return;
   }
+  console.log(`[Socket] Emitting payload to channel: ${event}`, payload);
   socket.emit(event, payload, acknowledgement);
 }
 
+export function updateRoomSettings(settings: { timerDuration: number; totalRounds: number; theme: string }) {
+  emitGame("v1:room:update_settings", settings);
+}
+
 export function updateSettings(settings: Partial<RoomSettings>) {
-  // MATCH API DOCS: Send naked values flat inside payload without sub-object grouping labels
-  emitGame("v1:host:update_settings", settings);
+  emitGame("v1:room:update_settings", settings);
 }
 
 export function startGame() {
@@ -224,16 +244,25 @@ export function submitDrawing(
   drawing: { strokes: Stroke[] }, 
   callback?: (response: { success: boolean; playerId?: string; strokeCount?: number }) => void
 ) {
-  // Transmits matching specific SubmitDrawingDto object structure shape: { strokes: [...] }
   emitGame("v1:canvas:submit_drawing", drawing, callback);
 }
 
 export function castStars(stars: number) {
-  // Transmits matching explicit CastVoteDto structure schema: { stars: number }
   emitGame("v1:vote:cast_stars", { stars });
 }
 
 export function triggerPlayAgain() {
-  // Transmits matching explicit PlayAgainDto structure schema: { confirm: true }
-  emitGame("v1:host:trigger_play_again", { confirm: true });
+  console.log("[Socket] triggerPlayAgain method executed from view component layer.");
+  
+  if (!socket) {
+    console.error("[Socket] Play Again blocked: global socket property is null!");
+    return;
+  }
+  
+  if (!socket.connected) {
+    console.warn("[Socket] Socket exists but status reports .connected is false. Attempting explicit force emit...");
+  }
+  
+  // Force sending directly down the reference pipeline matching Postman structure shape
+  socket.emit("v1:host:trigger_play_again", { confirm: true });
 }
