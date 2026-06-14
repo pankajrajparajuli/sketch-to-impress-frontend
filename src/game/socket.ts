@@ -144,9 +144,9 @@ export function connectGameSocket(credentials: Credentials) {
     state.setPlayers(roster);
 
     const gameState = snapshot.gameState || {};
-    const status = (gameState.status || snapshot.status || "LOBBY") as RoomStatus;
-    const currentRound = Number(gameState.currentRound || snapshot.round || 1);
-    const activePrompt = gameState.activePrompt || snapshot.prompt || "";
+    const status = (gameState.status || snapshot.status || snapshot.phase || "LOBBY") as RoomStatus;
+    const currentRound = Number(gameState.currentRound || snapshot.currentRound || snapshot.round || 1);
+    const activePrompt = gameState.activePrompt || snapshot.activePrompt || snapshot.prompt || "";
     const roundEndTimestamp = Number(gameState.roundEndTimestamp || snapshot.roundEndTimestamp || 0);
     const serverTime = Number(gameState.serverTime || snapshot.serverTime || Date.now());
 
