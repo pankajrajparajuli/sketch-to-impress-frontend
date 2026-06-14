@@ -51,10 +51,13 @@ export function Studio() {
 
   // Auto-submit fallback when round timer hits 0
   useEffect(() => {
-    if (seconds <= 0 && !submitted && !submitting.current) {
-      submit();
+    if (roundEndTimestamp > 0) {
+      const now = Date.now() + serverOffset;
+      if (now >= roundEndTimestamp && !submitted && !submitting.current) {
+        submit();
+      }
     }
-  }, [seconds, submitted]);
+  }, [seconds, submitted, roundEndTimestamp, serverOffset]);
 
   return (
     <main className="studio-sky min-h-screen px-4 py-6 md:p-8">

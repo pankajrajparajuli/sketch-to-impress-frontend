@@ -169,7 +169,7 @@ function Setting({ label, values, value, suffix = "", locked, onPick }: SettingP
       <p className="mb-3 font-display text-[9px] uppercase tracking-wider text-muted-foreground">
         {label}
       </p>
-      <div className="grid grid-cols-3 gap-2">
+      <div className={`grid gap-2 ${values.length === 4 ? "grid-cols-4" : "grid-cols-3"}`}>
         {values.map((option) => {
           const isSelected = String(option) === String(value);
           return (

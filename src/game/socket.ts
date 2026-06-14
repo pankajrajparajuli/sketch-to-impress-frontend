@@ -1,12 +1,8 @@
 import { io, type Socket } from "socket.io-client";
 import type {
   Credentials,
-  GalleryEntry,
-  Player,
-  ReconnectedSnapshot,
   RoomSettings,
   RoomStatus,
-  Standing,
   Stroke,
 } from "./types";
 import { useGameStore } from "./store";
@@ -16,20 +12,17 @@ let socket: Socket | null = null;
 let currentToken: string | null = null;
 
 export function connectGameSocket(credentials: Credentials) {
-  // 1. FIXED IDEMPOTENCY CHECK:
-  // If we already have a running socket connected with this user session token, 
-  // do NOT wipe listeners or disconnect. Simply return the active instance safely.
+  // Idempotency: if already connected with same token, just reconnect
   if (socket && currentToken === credentials.reconnectToken) {
-    if (!socket.connected) {
-      socket.connect();
-    }
+    if (!socket.connected) socket.connect();
     return socket;
   }
 
-  // 2. Only wipe state if we are completely changing user credentials/sessions
+  // Tear down any previous socket cleanly
   if (socket) {
     socket.removeAllListeners();
     socket.disconnect();
+    socket = null;
   }
 
   const store = useGameStore.getState();
@@ -37,135 +30,119 @@ export function connectGameSocket(credentials: Credentials) {
   store.setConnection(false, true);
 
   currentToken = credentials.reconnectToken;
-  const cleanBaseUrl = WS_URL.replace(/\/$/, ""); 
+  const cleanBaseUrl = WS_URL.replace(/\/$/, "");
 
-  // 3. Initialize connection to base manager instance
-  const baseManagerSocket = io(cleanBaseUrl, {
-    path: "/socket.io", 
-    auth: {
-      token: credentials.reconnectToken, 
-    },
-    query: {
-      token: credentials.reconnectToken,
-    },
-    transports: ["websocket"], 
+  // Connect DIRECTLY to the /game namespace with auth so all emits go to the right place
+  const gameSocket = io(`${cleanBaseUrl}/game`, {
+    auth: { token: credentials.reconnectToken, reconnectToken: credentials.reconnectToken },
+    query: { token: credentials.reconnectToken },
+    transports: ["websocket", "polling"],
     reconnection: true,
     reconnectionAttempts: 10,
     reconnectionDelay: 800,
-    forceNew: true, 
+    forceNew: true,
   });
 
-  // Switch connection context focus to the '/game' namespace multiplexer
-  const gameNamespace = baseManagerSocket.io.socket("/game");
-
-  // 4. Register Event Handlers strictly onto the safe sub-namespace container
-  gameNamespace.on("connect", () => {
+  gameSocket.on("connect", () => {
+    console.log("[Socket] Connected to /game namespace.");
     useGameStore.getState().setConnection(true, false);
   });
 
-  gameNamespace.on("disconnect", () => {
+  gameSocket.on("disconnect", () => {
+    console.log("[Socket] Disconnected from /game namespace.");
     useGameStore.getState().setConnection(false, true);
   });
 
-  gameNamespace.on("connect_error", (error) => {
+  gameSocket.on("connect_error", (error) => {
+    console.error("[Socket] Connection error:", error.message);
     useGameStore.getState().setError(error.message || "Could not connect to the room.");
   });
 
-  gameNamespace.on("v1:room:settings_changed", ({ settings }: { settings: Partial<RoomSettings> }) =>
-    useGameStore.getState().setSettings(normalizeSettings(settings)),
-  );
+  const handleSettingsUpdate = (data: any) => {
+    console.log("[Socket] Settings update received:", data);
+    const settings = data?.settings ?? data;
+    if (settings && typeof settings === "object") {
+      useGameStore.getState().setSettings(normalizeSettings(settings));
+    }
+  };
 
-  gameNamespace.on("v1:room:settings_updated", ({ settings }: { settings: Partial<RoomSettings> }) =>
-    useGameStore.getState().setSettings(normalizeSettings(settings)),
-  );
+  gameSocket.on("v1:room:settings_changed", handleSettingsUpdate);
+  gameSocket.on("v1:room:settings_updated", handleSettingsUpdate);
 
-  gameNamespace.on("v1:room:roster_updated", (data: any) => {
-    if (data && data.players) {
+  const handleRosterUpdate = (data: any) => {
+    if (data?.players) {
       useGameStore.getState().setPlayers(data.players);
     } else if (Array.isArray(data)) {
       useGameStore.getState().setPlayers(data);
     }
-  });
+  };
 
-  gameNamespace.on("v1:room:player_joined", (data: any) => {
-    if (data && data.players) {
-      useGameStore.getState().setPlayers(data.players);
-    } else if (Array.isArray(data)) {
-      useGameStore.getState().setPlayers(data);
-    }
-  });
+  gameSocket.on("v1:room:roster_updated", handleRosterUpdate);
+  gameSocket.on("v1:room:player_joined", handleRosterUpdate);
 
-  gameNamespace.on("v1:room:host_changed", (data: any) => {
-    // Sync with server specification payload parameters format: hostId vs newHostId
+  gameSocket.on("v1:room:host_changed", (data: any) => {
     const targetHostId = data?.hostId ?? data?.newHostId;
     if (targetHostId) useGameStore.getState().setHost(targetHostId);
   });
 
-  gameNamespace.on("v1:game:phase_changed", (data: { roomCode: string; status: RoomStatus }) => {
-    console.log("[Socket] Switch phase status requested by server:", data?.status);
-    if (data?.status) useGameStore.getState().setStatus(data.status);
-  });
-
-  gameNamespace.on(
-    "v1:game:round_started",
-    (data: { round: number; prompt: string; roundEndTimestamp: number; serverTime: number }) => {
-      console.log("[Socket] Starting a fresh drawing sequence:", data);
-      useGameStore.getState().startRound(data);
-    }
-  );
-
-  gameNamespace.on("v1:game:gallery_started", (data: any) => {
-    console.log("[Socket] Gallery event broadcast triggered:", data);
-    if (data?.gallery) {
-      useGameStore.getState().setGallery(data.gallery);
-    } else if (data) {
-      useGameStore.getState().setGallery(data);
+  gameSocket.on("v1:game:phase_changed", (data: { roomCode: string; status: RoomStatus }) => {
+    console.log("[Socket] Phase changed:", data?.status);
+    if (!data?.status) return;
+    if (data.status === "LOBBY") {
+      useGameStore.getState().resetMatch();
+    } else {
+      useGameStore.getState().setStatus(data.status);
     }
   });
 
-  gameNamespace.on("v1:gallery:next_canvas", (data: any) => {
-    console.log("[Socket] Distributed next carousel item canvas view:", data);
-    // Explicit switch to GALLERY status when server streams new evaluation items
-    useGameStore.getState().setStatus("GALLERY");
-    useGameStore.getState().setGallery(data);
+  gameSocket.on("v1:game:lobby_reset", () => {
+    console.log("[Socket] Lobby reset received. Resetting state...");
+    useGameStore.getState().resetMatch();
   });
 
-  // Globalized mapping pipeline for multi-channel round summary data bundles
-  const processStandingsDataStream = (data: any) => {
-    if (!data) return;
-    const items = data.standings ?? data.podium ?? (Array.isArray(data) ? data : null);
-    if (items) {
-      useGameStore.getState().setStandings(items);
+  gameSocket.on("v1:game:round_started", (data: { round: number; prompt: string; roundEndTimestamp: number; serverTime: number }) => {
+    console.log("[Socket] Round started:", data);
+    useGameStore.getState().startRound(data);
+  });
+
+  const handleGallery = (data: any) => {
+    console.log("[Socket] Gallery data received:", data);
+    const galleryPayload = data?.gallery ?? data;
+    if (galleryPayload) {
+      useGameStore.getState().setGallery(galleryPayload);
     }
   };
 
-  gameNamespace.on("v1:game:round_complete", (data) => {
-    processStandingsDataStream(data);
+  gameSocket.on("v1:game:gallery_started", handleGallery);
+  gameSocket.on("v1:gallery:next_canvas", (data: any) => {
+    console.log("[Socket] Next canvas:", data);
+    // setGallery already sets status to GALLERY
+    handleGallery(data);
   });
 
-  gameNamespace.on("v1:game:round_results_started", (data) => {
+  const processStandings = (data: any) => {
+    if (!data) return;
+    const items = data.standings ?? data.podium ?? (Array.isArray(data) ? data : null);
+    if (items) useGameStore.getState().setStandings(items);
+  };
+
+  gameSocket.on("v1:game:round_complete", processStandings);
+  gameSocket.on("v1:game:round_results_started", (data: any) => {
     useGameStore.getState().setStatus("ROUND_RESULTS");
-    processStandingsDataStream(data);
+    processStandings(data);
   });
-
-  gameNamespace.on("v1:game:match_over", (data) => {
-    processStandingsDataStream(data);
-  });
-
-  gameNamespace.on("v1:game:final_results_started", (data) => {
+  gameSocket.on("v1:game:match_over", processStandings);
+  gameSocket.on("v1:game:final_results_started", (data: any) => {
     useGameStore.getState().setStatus("FINAL_RESULTS");
-    processStandingsDataStream(data);
+    processStandings(data);
   });
 
-  gameNamespace.on("v1:player:reconnected", (snapshot: any) => {
-    console.log("[Socket] Reconnected snapshot received:", snapshot);
+  gameSocket.on("v1:player:reconnected", (snapshot: any) => {
+    console.log("[Socket] Reconnected snapshot:", snapshot);
     const state = useGameStore.getState();
-
-    // Support nested roster or flat players list
     const roster = snapshot.roster || snapshot.players || [];
     state.setPlayers(roster);
 
-    // Support nested gameState or flat snapshot fields
     const gameState = snapshot.gameState || {};
     const status = (gameState.status || snapshot.status || "LOBBY") as RoomStatus;
     const currentRound = Number(gameState.currentRound || snapshot.round || 1);
@@ -173,36 +150,31 @@ export function connectGameSocket(credentials: Credentials) {
     const roundEndTimestamp = Number(gameState.roundEndTimestamp || snapshot.roundEndTimestamp || 0);
     const serverTime = Number(gameState.serverTime || snapshot.serverTime || Date.now());
 
-    state.setStatus(status);
     state.setConnection(true, false);
 
     if (status === "DRAWING" || status === "STUDIO") {
       if (activePrompt && roundEndTimestamp) {
-        state.startRound({
-          round: currentRound,
-          prompt: activePrompt,
-          roundEndTimestamp,
-          serverTime,
-        });
+        state.startRound({ round: currentRound, prompt: activePrompt, roundEndTimestamp, serverTime });
+      } else {
+        state.setStatus(status);
       }
     } else if (status === "GALLERY") {
       const galleryData = snapshot.gallery || gameState.gallery || null;
-      if (galleryData) {
-        state.setGallery(galleryData);
-      }
+      if (galleryData) state.setGallery(galleryData);
+      else state.setStatus(status);
+    } else {
+      state.setStatus(status);
     }
   });
 
-  // Track both default socket exceptions and custom documentation error payload gates
   const interceptException = (error: { message?: string; code?: string }) => {
-    console.error("[Socket Exception Guard] Intercepted operational break:", error);
+    console.error("[Socket] Exception:", error);
     useGameStore.getState().setError(error.message ?? "The game server reported an error.");
   };
-  gameNamespace.on("error", interceptException);
-  gameNamespace.on("error:exception", interceptException);
+  gameSocket.on("error", interceptException);
+  gameSocket.on("error:exception", interceptException);
 
-  // Update master pointer target to match namespace proxy layout
-  socket = gameNamespace as unknown as Socket;
+  socket = gameSocket;
   return socket;
 }
 
