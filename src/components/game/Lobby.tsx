@@ -1,34 +1,66 @@
+import { useEffect, useState } from "react";
 import { Copy, Crown, LockKeyhole, Radio, Wifi, WifiOff } from "lucide-react";
 import { useGameStore } from "@/game/store";
 import { emitGame } from "@/game/socket";
-import type { RoomSettings, Theme } from "@/game/types";
+import type { Theme } from "@/game/types";
 import { PixelButton } from "./PixelButton";
 
-const options = {
-  timerDuration: [60, 90, 120],
-  totalRounds: [1, 3, 5],
+const OPTIONS = {
+  timerDuration: [60, 90, 120] as number[],
+  totalRounds: [1, 3, 5] as number[],
   theme: ["ANIME", "CARTOON", "GAMING", "RANDOM"] as Theme[],
 };
 
 export function Lobby() {
   const credentials = useGameStore((state) => state.credentials);
   const players = useGameStore((state) => state.players);
-  const settings = useGameStore((state) => state.settings);
+  const storeSettings = useGameStore((state) => state.settings);
   const connected = useGameStore((state) => state.connected);
-  const setSettings = useGameStore((state) => state.setSettings);
+
+  // Local state mirrors the server-authoritative settings.
+  // Initialized from the store so it starts correct on mount / reconnect.
+  const [timerDuration, setTimerDuration] = useState<number>(
+    storeSettings.timerDuration ?? 60,
+  );
+  const [totalRounds, setTotalRounds] = useState<number>(
+    storeSettings.totalRounds ?? 3,
+  );
+  const [theme, setTheme] = useState<Theme>(storeSettings.theme ?? "RANDOM");
+
+  // Drive local state from the Zustand store.
+  // The global socket handler in socket.ts already writes to the store
+  // when 'v1:room:settings_updated' arrives, so watching store fields
+  // here covers both initial load and every live broadcast.
+  useEffect(() => {
+    if (storeSettings.timerDuration) setTimerDuration(storeSettings.timerDuration);
+    if (storeSettings.totalRounds) setTotalRounds(storeSettings.totalRounds);
+    if (storeSettings.theme) setTheme(storeSettings.theme);
+  }, [storeSettings.timerDuration, storeSettings.totalRounds, storeSettings.theme]);
 
   if (!credentials) return null;
   const isHost = credentials.playerId === credentials.hostId;
 
-  function update(patch: Partial<RoomSettings>) {
-    if (!isHost) return;
+  // Instant pick handlers: update local state AND emit immediately so all
+  // clients see the change without waiting for the host to press Apply.
+  function handleTimerPick(value: number) {
+    setTimerDuration(value);
+    emitGame("v1:room:update_settings", { timerDuration: value, totalRounds, theme });
+  }
 
-    // Apply patch immediately to store hook
-    setSettings(patch);
+  function handleRoundsPick(value: number) {
+    setTotalRounds(value);
+    emitGame("v1:room:update_settings", { timerDuration, totalRounds: value, theme });
+  }
 
-    // Grab a pure up-to-date snapshot of store to broadcast securely over socket
-    const currentLatestSettings = useGameStore.getState().settings;
-    emitGame("v1:host:update_settings", currentLatestSettings);
+  function handleThemePick(value: Theme) {
+    setTheme(value);
+    emitGame("v1:room:update_settings", { timerDuration, totalRounds, theme: value });
+  }
+
+  // Manual re-sync: bundles the current local states and forces a re-emission
+  // as a protective fallback in case any earlier emission was dropped.
+  function applySettings() {
+    emitGame("v1:room:update_settings", { timerDuration, totalRounds, theme });
   }
 
   return (
@@ -46,7 +78,7 @@ export function Lobby() {
             <Copy className="size-5" />
           </button>
         </div>
-        
+
         <div className="flex items-center gap-2 border-4 border-foreground bg-card px-3 py-2 text-sm font-bold">
           {connected ? (
             <Wifi className="text-primary" />
@@ -59,8 +91,8 @@ export function Lobby() {
 
       {/* Main Content Arena */}
       <main className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[0.85fr_1.15fr]">
-        
-        {/* Roster Layout Section */}
+
+        {/* Roster Section */}
         <section>
           <div className="mb-3 flex items-center justify-between">
             <h1 className="font-display text-sm">PLAYER ROSTER</h1>
@@ -77,7 +109,7 @@ export function Lobby() {
                   <span className="grid size-11 place-items-center border-4 border-foreground bg-muted font-display text-xs">
                     {String(index + 1).padStart(2, "0")}
                   </span>
-                  
+
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-display text-[10px]">
                       {player.username}
@@ -104,7 +136,7 @@ export function Lobby() {
           </div>
         </section>
 
-        {/* Configuration Panel Section */}
+        {/* Configuration Panel */}
         <section className="border-4 border-foreground bg-card p-5 pixel-shadow-lg md:p-7">
           <div className="mb-6 flex items-center justify-between">
             <div>
@@ -118,52 +150,67 @@ export function Lobby() {
 
           <Setting
             label="DRAW TIMER"
-            values={options.timerDuration}
-            value={settings.timerDuration}
+            values={OPTIONS.timerDuration}
+            active={timerDuration}
             suffix="s"
             locked={!isHost}
-            onPick={(value) => update({ timerDuration: Number(value) })}
-          />
-          
-          <Setting
-            label="ROUNDS"
-            values={options.totalRounds}
-            value={settings.totalRounds}
-            locked={!isHost}
-            onPick={(value) => update({ totalRounds: Number(value) })}
-          />
-          
-          <Setting
-            label="PROMPT DECK"
-            values={options.theme}
-            value={settings.theme}
-            locked={!isHost}
-            onPick={(value) => update({ theme: value as Theme })}
+            onPick={(v) => handleTimerPick(v as number)}
           />
 
-          <PixelButton
-            className="mt-7 w-full"
-            disabled={!isHost || !connected}
-            onClick={() => emitGame("v1:host:start_game")}
-          >
-            {isHost ? "START GAME" : "WAITING FOR HOST..."}
-          </PixelButton>
+          <Setting
+            label="ROUNDS"
+            values={OPTIONS.totalRounds}
+            active={totalRounds}
+            locked={!isHost}
+            onPick={(v) => handleRoundsPick(v as number)}
+          />
+
+          <Setting
+            label="PROMPT DECK"
+            values={OPTIONS.theme}
+            active={theme}
+            locked={!isHost}
+            onPick={(v) => handleThemePick(v as Theme)}
+          />
+
+          {isHost && (
+            <>
+              <PixelButton
+                tone="yellow"
+                className="mt-5 w-full"
+                disabled={!connected}
+                onClick={applySettings}
+              >
+                APPLY SETTINGS
+              </PixelButton>
+
+              <PixelButton
+                className="mt-3 w-full"
+                disabled={!connected}
+                onClick={() => emitGame("v1:host:start_game")}
+              >
+                START GAME
+              </PixelButton>
+            </>
+          )}
         </section>
       </main>
     </div>
   );
 }
 
+// ─── Setting sub-component ────────────────────────────────────────────────────
+
 interface SettingProps {
   label: string;
   values: readonly (string | number)[];
-  value: string | number;
+  active: string | number;
   suffix?: string;
   locked: boolean;
   onPick: (value: string | number) => void;
 }
 
-function Setting({ label, values, value, suffix = "", locked, onPick }: SettingProps) {
+function Setting({ label, values, active, suffix = "", locked, onPick }: SettingProps) {
   return (
     <div className="mb-6">
       <p className="mb-3 font-display text-[9px] uppercase tracking-wider text-muted-foreground">
@@ -171,7 +218,7 @@ function Setting({ label, values, value, suffix = "", locked, onPick }: SettingP
       </p>
       <div className={`grid gap-2 ${values.length === 4 ? "grid-cols-4" : "grid-cols-3"}`}>
         {values.map((option) => {
-          const isSelected = String(option) === String(value);
+          const isActive = String(option) === String(active);
           return (
             <button
               key={option}
@@ -179,9 +226,9 @@ function Setting({ label, values, value, suffix = "", locked, onPick }: SettingP
               disabled={locked}
               onClick={() => onPick(option)}
               className={`min-h-12 border-4 border-foreground px-2 font-display text-[9px] transition-transform ${
-                isSelected
+                isActive
                   ? "translate-x-1 translate-y-1 bg-secondary shadow-none"
-                  : "bg-background pixel-shadow-sm hover:-translate-y-0.5 disabled:opacity-60 disabled:hover:translate-y-0"
+                  : "bg-background pixel-shadow-sm hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
               }`}
             >
               {option}

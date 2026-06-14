@@ -186,6 +186,10 @@ function normalizeSettings(settings: Partial<RoomSettings>) {
   };
 }
 
+export function getSocket(): Socket | null {
+  return socket;
+}
+
 export function disconnectGameSocket() {
   if (socket) {
     socket.removeAllListeners();
