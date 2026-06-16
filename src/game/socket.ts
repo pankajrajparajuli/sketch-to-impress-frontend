@@ -68,6 +68,7 @@ export function connectGameSocket(credentials: Credentials) {
 
   gameSocket.on("v1:room:settings_changed", handleSettingsUpdate);
   gameSocket.on("v1:room:settings_updated", handleSettingsUpdate);
+  gameSocket.on("v1:room:update_settings", handleSettingsUpdate);
 
   const handleRosterUpdate = (data: any) => {
     if (data?.players) {
