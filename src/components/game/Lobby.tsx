@@ -186,7 +186,7 @@ export function Lobby() {
 
               <PixelButton
                 className="mt-3 w-full"
-                disabled={!connected}
+                disabled={!connected || players.length < 2}
                 onClick={() => emitGame("v1:host:start_game")}
               >
                 START GAME
