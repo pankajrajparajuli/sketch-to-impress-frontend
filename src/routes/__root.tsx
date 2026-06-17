@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
 import { Analytics } from "@vercel/analytics/react";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
@@ -80,7 +81,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Sketch to Impress" },
       { name: "description", content: "A fast multiplayer drawing and anonymous rating party game." },
-      { name: "author", content: "Sketch to Impress" },
+      { name: "author", content: "Bliss Bliss" },
       { property: "og:title", content: "Sketch to Impress" },
       { property: "og:description", content: "A fast multiplayer drawing and anonymous rating party game." },
       { property: "og:type", content: "website" },
@@ -112,6 +113,7 @@ function RootShell({ children }: { children: ReactNode }) {
         {children}
         <Scripts />
         <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );
